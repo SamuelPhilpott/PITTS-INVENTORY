@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PITTS - Limelight Robotics shared parts</title>
+<style>
+:root{--bg:#12161c;--panel:#1c232d;--line:#2b3542;--fg:#eaf0f6;--dim:#92a1b3;--lime:#a6e22e;--ok:#35c27a;--bad:#ef5b5b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.4 "Avenir Next","Segoe UI",system-ui,sans-serif}
+button,input{font:inherit;color:inherit}
+header{display:flex;align-items:baseline;gap:14px;padding:14px 20px;background:var(--panel);border-bottom:2px solid var(--lime);cursor:pointer}
+header b{font-size:26px;letter-spacing:.04em;color:var(--lime)}
+header span{color:var(--dim)}
+main{max-width:860px;margin:0 auto;padding:16px}
+.bar{display:flex;gap:10px;margin-bottom:12px}
+input{width:100%;background:var(--panel);border:2px solid var(--line);border-radius:8px;padding:12px 14px;outline:none}
+input:focus{border-color:var(--lime)}
+button{background:var(--panel);border:2px solid var(--line);border-radius:8px;padding:12px 16px;cursor:pointer;white-space:nowrap}
+button:hover{border-color:var(--lime)}
+button:focus-visible{outline:3px solid var(--lime);outline-offset:2px}
+.pri{background:var(--lime);border-color:var(--lime);color:#10150a;font-weight:700}
+.bad{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700}
+.ok{background:var(--ok);border-color:var(--ok);color:#06130c;font-weight:700}
+.row{display:grid;grid-template-columns:9em 1fr auto;gap:12px;align-items:center;padding:14px;border-bottom:1px solid var(--line);cursor:pointer}
+.row:hover{background:var(--panel)}
+.row b{color:var(--lime);overflow-wrap:anywhere}
+.row span{color:var(--fg);overflow-wrap:anywhere}
+.row em{font-style:normal;font-weight:700;font-variant-numeric:tabular-nums}
+.zero{color:var(--bad)}
+.dim{color:var(--dim)}
+.split{display:grid;grid-template-columns:1fr auto;gap:28px;align-items:start}
+@media(max-width:640px){.split{grid-template-columns:1fr}.row{grid-template-columns:6em 1fr auto}}
+.big{font-size:84px;line-height:1;font-weight:800;font-variant-numeric:tabular-nums;color:var(--lime)}
+.big.zero{color:var(--bad)}
+.step{display:flex;align-items:center;gap:12px;margin:16px 0}
+.step button{width:64px;height:56px;font-size:28px}
+.step output{font-size:40px;min-width:2.2ch;text-align:center;font-weight:700}
+.acts{display:grid;gap:10px}
+.acts button{height:60px;font-size:19px}
+label{display:block;margin:12px 0 4px;color:var(--dim)}
+.err{color:var(--bad);min-height:1.4em}
+footer{max-width:860px;margin:24px auto 40px;padding:14px 16px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+footer small{flex:1 1 100%}
+#st{font-weight:700}
+#st.good{color:var(--ok)}#st.fail{color:var(--bad)}
+.warn{color:#ffd166}
+</style>
+</head>
+<body>
+<header onclick="showList()" title="Back to the parts list"><b>PITTS</b><span>Limelight Robotics parts inventory</span></header>
+<main id="app"></main>
+<footer>
+  <span id="st">Connecting...</span>
+  <button onclick="backup()">Download backup</button>
+  <button onclick="document.getElementById('imp').click()">Add from backup</button>
+  <button onclick="dl('pitts-parts.csv',csv(),'text/csv')">Export spreadsheet (CSV)</button>
+  <input id="imp" type="file" accept=".json,application/json" hidden onchange="restore(this)">
+  <small id="bk" class="dim"></small>
+</footer>
+<script type="module">
+const FB_VER = "10.12.2";
+
+/* ===== PASTE YOUR FIREBASE SETTINGS HERE (from the Firebase console) ===== */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAA8fbu7teiABzJjJ5J9YfUUMo6aYO7gD0",
+  authDomain: "limelight-pitts.firebaseapp.com",
+  projectId: "limelight-pitts",
+  appId: "1:452689410443:web:55204070ba120b78b3178e"
+};
+/* ========================================================================= */
+
+const $ = id => document.getElementById(id);
+let parts = [], q = "", amt = 1, view = "list", viewId = null, fb = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const get = id => parts.find(p => p.id === id);
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const setStatus = (m, c) => { const s = $("st"); s.textContent = m; s.className = c || ""; };
+const failed = e => setStatus("NOT SAVED: " + (e.code || e.message) + ". Download a backup and tell your admin.", "fail");
+const write = p => p.catch(failed);   // a write promise only settles once the server confirms it
+
+/* ---------- connect + live sync ---------- */
+async function init() {
+  if (FIREBASE_CONFIG.apiKey.startsWith("PASTE")) {
+    $("app").innerHTML = `<h2>One-time setup needed</h2><p class="dim">Open this file in a text editor and paste your Firebase settings where it says PASTE YOUR FIREBASE SETTINGS HERE. Then upload it again.</p>`;
+    return setStatus("Not connected: setup needed", "fail");
+  }
+  try {
+    const base = "https://www.gstatic.com/firebasejs/" + FB_VER + "/";
+    const [{ initializeApp }, F] = await Promise.all([import(base + "firebase-app.js"), import(base + "firebase-firestore.js")]);
+    const db = F.initializeFirestore(initializeApp(FIREBASE_CONFIG),
+      { localCache: F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() }) });
+    fb = { F, db, col: F.collection(db, "parts") };
+    showList();
+    F.onSnapshot(fb.col, { includeMetadataChanges: true }, snap => {
+      parts = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+      const m = snap.metadata;
+      if (m.hasPendingWrites) setStatus(navigator.onLine ? "Saving..." : "Offline: saved on this device, will sync when you reconnect");
+      else if (m.fromCache) setStatus(navigator.onLine ? "Connecting..." : "Offline: showing the last synced copy", navigator.onLine ? "" : "fail");
+      else setStatus("All changes saved and shared with the team", "good");
+      refresh();
+    }, e => setStatus("Can't reach the shared database (" + e.code + "). Check the Firestore rules and settings.", "fail"));
+  } catch (e) {
+    setStatus("Couldn't load the database library. Check your internet connection.", "fail");
+  }
+}
+function refresh() {
+  if (view === "list") rows();
+  else if (view === "part") showPart(viewId, true);
+}
+
+/* ---------- backup / restore / csv ---------- */
+function dl(name, text, type) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1500); }
+function backup() {
+  dl("pitts-backup-" + new Date().toISOString().slice(0, 10) + ".json", JSON.stringify({ app: "PITTS", parts }, null, 1), "application/json");
+  try { localStorage.setItem("earths.bk", Date.now()); } catch (e) {}
+  foot();
+}
+function foot() {
+  let t = 0; try { t = +localStorage.getItem("earths.bk") || 0; } catch (e) {}
+  $("bk").textContent = "Everyone shares one live inventory. A backup file is an extra safety copy" + (t ? " (last downloaded here: " + new Date(t).toLocaleDateString() + ")." : ".");
+}
+function restore(inp) {
+  const f = inp.files[0]; inp.value = ""; if (!f || !fb) return;
+  f.text().then(async t => {
+    const d = JSON.parse(t), list = Array.isArray(d) ? d : d.parts;
+    if (!Array.isArray(list) || list.some(p => !p || !p.sku)) throw 0;
+    if (!confirm("Add or update " + list.length + " parts from this backup? Parts with the same ID are overwritten; nothing is deleted.")) return;
+    for (let i = 0; i < list.length; i += 400) {
+      const b = fb.F.writeBatch(fb.db);
+      list.slice(i, i + 400).forEach(p => b.set(fb.F.doc(fb.col, String(p.id || newId())),
+        { sku: String(p.sku), maker: p.maker || "", descr: p.descr || "", dims: p.dims || "", qty: parseInt(p.qty) || 0 }));
+      await b.commit();
+    }
+  }).catch(() => alert("That file isn't a PITTS backup."));
+}
+function csv() {
+  const c = s => '"' + String(s ?? "").replace(/"/g, '""') + '"';
+  return ["SKU,Manufacturer,Description,Dimensions,Quantity", ...parts.map(p => [p.sku, p.maker, p.descr, p.dims, p.qty].map(c).join(","))].join("\r\n");
+}
+
+/* ---------- parts list ---------- */
+function showList() {
+  if (!fb) return;
+  view = "list"; viewId = null;
+  $("app").innerHTML = `<div class="bar"><input id="s" type="search" placeholder="Search SKU, maker, or description" value="${esc(q)}" autocomplete="off"><button class="pri" onclick="showForm()">New part</button></div><div id="rows"></div>`;
+  $("s").oninput = e => { q = e.target.value; rows(); };
+  rows();
+}
+function rows() {
+  const t = q.trim().toLowerCase();
+  const r = parts.filter(p => [p.sku, p.maker, p.descr].join(" ").toLowerCase().includes(t))
+    .sort((a, b) => String(a.sku).localeCompare(String(b.sku), undefined, { numeric: true }));
+  $("rows").innerHTML = r.length ? r.map(p => `<div class="row" onclick="showPart('${p.id}')"><b>${esc(p.sku)}</b><span>${esc(p.maker)} ${esc(p.descr)}</span><em class="${p.qty > 0 ? "" : "zero"}">x ${p.qty}</em></div>`).join("")
+    : `<p class="dim">${parts.length ? "No parts match that search." : "No parts yet. Tap New part to add the first one."}</p>`;
+}
+
+/* ---------- one part: take out / add stock ---------- */
+function showPart(id, keep) {
+  const p = get(id); if (!p) return showList();
+  view = "part"; viewId = id; if (!keep) amt = 1;
+  $("app").innerHTML = `<div class="bar"><button onclick="showList()">Back to parts</button><button onclick="showForm('${id}')">Edit</button></div>
+  <h2 style="margin:8px 0 4px;color:var(--lime)">${esc(p.sku)}</h2>
+  <div class="split"><div>
+    <label>Manufacturer</label><div>${esc(p.maker) || "-"}</div>
+    <label>Description</label><div>${esc(p.descr) || "-"}</div>
+    <label>Dimensions</label><div>${esc(p.dims) || "-"}</div>
+  </div><div>
+    <div class="dim">In stock</div><div class="big ${p.qty > 0 ? "" : "zero"}">${p.qty}</div>
+    <div class="step"><button onclick="nudge(-1)" aria-label="Fewer">-</button><output id="amt">${amt}</output><button onclick="nudge(1)" aria-label="More">+</button></div>
+    <div class="acts"><button class="bad" onclick="move('${id}',-1)">Take out</button><button class="ok" onclick="move('${id}',1)">Add stock</button></div>
+  </div></div>`;
+}
+function nudge(d) { amt = Math.max(1, amt + d); $("amt").textContent = amt; }
+function move(id, sign) {
+  const p = get(id); if (!p || !fb) return;
+  const d = sign < 0 ? -Math.min(amt, Math.max(0, p.qty)) : amt;   // never take out more than is in stock
+  if (!d) return;
+  amt = 1;
+  write(fb.F.updateDoc(fb.F.doc(fb.col, id), { qty: fb.F.increment(d) }));   // increment is safe when two people edit at once
+}
+
+/* ---------- new / edit ---------- */
+function showForm(id) {
+  view = "form";
+  const p = id ? get(id) : { sku: "", maker: "", descr: "", dims: "", qty: 0 };
+  $("app").innerHTML = `<div class="bar"><button onclick="${id ? `showPart('${id}')` : "showList()"}">Cancel</button></div>
+  <h2 style="margin:8px 0">${id ? "Edit part" : "New part type"}</h2>
+  <label for="f1">SKU</label><input id="f1" value="${esc(p.sku)}" autocomplete="off">
+  <label for="f2">Manufacturer</label><input id="f2" value="${esc(p.maker)}" autocomplete="off">
+  <label for="f3">What it is</label><input id="f3" value="${esc(p.descr)}" autocomplete="off">
+  <label for="f4">Dimensions</label><input id="f4" value="${esc(p.dims)}" autocomplete="off">
+  ${id ? "" : `<label for="f5">Starting quantity</label><input id="f5" type="number" min="0" value="0" inputmode="numeric">`}
+  <p class="err" id="err"></p>
+  <div class="bar"><button class="pri" onclick="saveForm('${id || ""}')">Save part</button>${id ? `<button class="bad" onclick="del('${id}')">Delete part</button>` : ""}</div>`;
+  $("f1").focus();
+}
+function saveForm(id) {
+  const sku = $("f1").value.trim();
+  if (!sku) return $("err").textContent = "SKU is required.";
+  if (parts.some(x => x.id !== id && String(x.sku).toLowerCase() === sku.toLowerCase())) return $("err").textContent = "That SKU already exists.";
+  const v = { sku, maker: $("f2").value.trim(), descr: $("f3").value.trim(), dims: $("f4").value.trim() };
+  if (id) { Object.assign(get(id), v); write(fb.F.updateDoc(fb.F.doc(fb.col, id), v)); }
+  else {
+    id = newId(); v.qty = Math.max(0, parseInt($("f5").value) || 0);
+    parts.push({ id, ...v });
+    write(fb.F.setDoc(fb.F.doc(fb.col, id), v));
+  }
+  showPart(id);
+}
+function del(id) {
+  const p = get(id);
+  if (confirm("Delete " + p.sku + " for everyone? This can't be undone.")) {
+    parts = parts.filter(x => x.id !== id);
+    write(fb.F.deleteDoc(fb.F.doc(fb.col, id)));
+    showList();
+  }
+}
+
+Object.assign(window, { showList, showForm, showPart, nudge, move, saveForm, del, backup, restore, csv, dl });
+foot();
+setStatus("Connecting...");
+init();
+</script>
+</body>
+</html>
